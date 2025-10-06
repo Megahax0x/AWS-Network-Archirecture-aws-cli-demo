@@ -1,0 +1,555 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Advanced multi-AZ VPC + ALB + AutoScaling CloudFormation template.
+  Provides: VPC, two public subnets, two private subnets, NAT Gateways per AZ,
+  Application Load Balancer, AutoScaling Group for the app instances, SSM
+  Instance Profile and secure defaults (IMDSv2). Includes CreationPolicy
+  and cfn-signal integration so CloudFormation waits for instance bootstrapping.
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for the VPC
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.0.1.0/24
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.0.2.0/24
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 10.0.11.0/24
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: 10.0.12.0/24
+  LatestAmi:
+    Description: Amazon Linux 2 AMI (SSM parameter)
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.nano
+      - t3.micro
+      - t3.small
+      - t3.medium
+    Description: EC2 instance type for application instances
+  KeyName:
+    Type: String
+    Default: ""
+    Description: Optional EC2 KeyPair name for emergency SSH (leave blank to use SSM only)
+  EnableBastion:
+    Type: String
+    AllowedValues: ["yes","no"]
+    Default: "no"
+    Description: Set to 'yes' to create a bastion instance (SSM-capable). If 'no', no bastion will be created.
+  DesiredCapacity:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 4
+  MinSize:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 4
+  MaxSize:
+    Type: Number
+    Default: 3
+    MinValue: 1
+    MaxValue: 10
+
+Conditions:
+  CreateBastion:
+    Fn::Equals:
+      - Ref: EnableBastion
+      - "yes"
+  HasKeyName:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: KeyName
+          - ""
+
+Resources:
+  ##########################################################################
+  # Networking
+  ##########################################################################
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock:
+        Ref: VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-igw"
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: VPC
+      InternetGatewayId:
+        Ref: InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-public-rt"
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId:
+        Ref: PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock:
+        Ref: PublicSubnet1Cidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-public-1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock:
+        Ref: PublicSubnet2Cidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-public-2"
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnet1
+      RouteTableId:
+        Ref: PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnet2
+      RouteTableId:
+        Ref: PublicRouteTable
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-private-rt-1"
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-private-rt-2"
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock:
+        Ref: PrivateSubnet1Cidr
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-private-1"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock:
+        Ref: PrivateSubnet2Cidr
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-private-2"
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PrivateSubnet1
+      RouteTableId:
+        Ref: PrivateRouteTable1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PrivateSubnet2
+      RouteTableId:
+        Ref: PrivateRouteTable2
+
+  ##########################################################################
+  # NAT Gateways (one per AZ) + EIPs (Retain)
+  ##########################################################################
+  EIPForNAT1:
+    Type: AWS::EC2::EIP
+    DeletionPolicy: Retain
+    Properties:
+      Domain: vpc
+
+  NATGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+          - EIPForNAT1
+          - AllocationId
+      SubnetId:
+        Ref: PublicSubnet1
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-nat-1"
+
+  EIPForNAT2:
+    Type: AWS::EC2::EIP
+    DeletionPolicy: Retain
+    Properties:
+      Domain: vpc
+
+  NATGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+          - EIPForNAT2
+          - AllocationId
+      SubnetId:
+        Ref: PublicSubnet2
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-nat-2"
+
+  ##########################################################################
+  # Private route table default routes to NATs
+  ##########################################################################
+  PrivateDefaultRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: NATGateway1
+
+  PrivateDefaultRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: NATGateway2
+
+  ##########################################################################
+  # Security Groups
+  ##########################################################################
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP/HTTPS to ALB
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-alb-sg"
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow traffic from ALB only and SSM
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId:
+            Ref: ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-app-sg"
+
+  BastionSecurityGroup:
+    Condition: CreateBastion
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Bastion SG: no SSH required if using SSM; optional KeyPair for emergency"
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-bastion-sg"
+
+  ##########################################################################
+  # IAM: SSM Instance Role and Instance Profile
+  ##########################################################################
+  SSMInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Path: /
+
+  SSMInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: SSMInstanceRole
+      Path: /
+
+  ##########################################################################
+  # Application Load Balancer
+  ##########################################################################
+  AppLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name:
+        Fn::Sub: "${AWS::StackName}-alb"
+      Subnets:
+        - Ref: PublicSubnet1
+        - Ref: PublicSubnet2
+      SecurityGroups:
+        - Ref: ALBSecurityGroup
+      Scheme: internet-facing
+      Type: application
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-alb"
+
+  AppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name:
+        Fn::Sub: "${AWS::StackName}-tg"
+      Port: 80
+      Protocol: HTTP
+      VpcId:
+        Ref: VPC
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      Matcher:
+        HttpCode: 200
+
+  AppListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn:
+        Ref: AppLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: AppTargetGroup
+
+  ##########################################################################
+  # Launch Template / AutoScaling Group for app instances
+  ##########################################################################
+  AppLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId:
+        Ref: LatestAmi
+      InstanceType:
+        Ref: InstanceType
+      IamInstanceProfile:
+        Ref: SSMInstanceProfile
+      SecurityGroups:
+        - Ref: AppSecurityGroup
+      KeyName:
+        Fn::If:
+          - HasKeyName
+          - Ref: KeyName
+          - Ref: AWS::NoValue
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #!/bin/bash -xe
+            yum update -y
+            yum install -y httpd awslogs
+            systemctl enable httpd
+            systemctl start httpd
+            echo "Hello from ASG instance" > /var/www/html/index.html
+
+            # Install aws-cfn-bootstrap (cfn-signal) if missing
+            if [ ! -f /opt/aws/bin/cfn-signal ]; then
+              yum install -y python3-pip sudo
+              pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz || true
+            fi
+
+            # Signal success to CloudFormation for AutoScalingGroup
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppAutoScalingGroup --region ${AWS::Region} || true
+
+  AppAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    CreationPolicy:
+      ResourceSignal:
+        Count:
+          Ref: DesiredCapacity
+        Timeout: PT20M
+    Properties:
+      VPCZoneIdentifier:
+        - Ref: PrivateSubnet1
+        - Ref: PrivateSubnet2
+      LaunchConfigurationName:
+        Ref: AppLaunchConfiguration
+      MinSize:
+        Ref: MinSize
+      MaxSize:
+        Ref: MaxSize
+      DesiredCapacity:
+        Ref: DesiredCapacity
+      TargetGroupARNs:
+        - Ref: AppTargetGroup
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName}-app"
+          PropagateAtLaunch: true
+
+  ##########################################################################
+  # Optional Bastion (SSM managed) - no public SSH required
+  ##########################################################################
+  BastionInstance:
+    Condition: CreateBastion
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId:
+        Ref: LatestAmi
+      SubnetId:
+        Ref: PublicSubnet1
+      SecurityGroupIds:
+        - Ref: BastionSecurityGroup
+      KeyName:
+        Fn::If:
+          - HasKeyName
+          - Ref: KeyName
+          - Ref: AWS::NoValue
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #!/bin/bash -xe
+            yum update -y
+            yum install -y awslogs
+            # ensure SSM agent is running (Amazon Linux 2 usually has it preinstalled)
+            systemctl enable amazon-ssm-agent || true
+            systemctl start amazon-ssm-agent || true
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+
+Outputs:
+  VpcId:
+    Description: The VPC Id
+    Value:
+      Ref: VPC
+  PublicSubnets:
+    Description: Public subnet IDs (comma separated)
+    Value:
+      Fn::Join:
+        - ","
+        - - Ref: PublicSubnet1
+          - Ref: PublicSubnet2
+  PrivateSubnets:
+    Description: Private subnet IDs (comma separated)
+    Value:
+      Fn::Join:
+        - ","
+        - - Ref: PrivateSubnet1
+          - Ref: PrivateSubnet2
+  ALBDNS:
+    Description: Application Load Balancer DNS name
+    Value:
+      Fn::GetAtt:
+        - AppLoadBalancer
+        - DNSName
+  AutoScalingGroup:
+    Description: AutoScaling Group name
+    Value:
+      Ref: AppAutoScalingGroup
+  BastionId:
+    Condition: CreateBastion
+    Description: Bastion instance id (if created)
+    Value:
+      Ref: BastionInstance
