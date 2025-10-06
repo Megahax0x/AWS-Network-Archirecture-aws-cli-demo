@@ -12,7 +12,7 @@ Optional extended description
 ---------------------------
 You can place an extended description here describing the repository intent, ownership, deployment process, environment naming, and any compliance or cost considerations. Example:
 
-"This stack is intended for sandbox and development use. For production use, adjust CIDRs, enable monitoring and alarms (CloudWatch), use Launch Templates, add AutoScaling lifecycle hooks, and store state and templates in an IaC pipeline (CodePipeline/CodeBuild, Terraform Cloud, etc.). Avoid opening broad CIDR ranges for SSH and HTTP on security groups; prefer ALB for public traffic and Session Manager for operations. NAT Gateways incur hourly and data charges; plan accordingly."
+This stack is intended for sandbox and development use. For production use, adjust CIDRs, enable monitoring and alarms (CloudWatch), use Launch Templates, add AutoScaling lifecycle hooks, and store state and templates in an IaC pipeline (CodePipeline/CodeBuild, Terraform Cloud, etc.). Avoid opening broad CIDR ranges for SSH and HTTP on security groups; prefer ALB for public traffic and Session Manager for operations. NAT Gateways incur hourly and data charges; plan accordingly.
 
 How to validate locally
 -----------------------
