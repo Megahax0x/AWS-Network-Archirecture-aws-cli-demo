@@ -1,4 +1,4 @@
-AWSTemplateFormatVersion: '2010-09-09'
+AWSTemplateFormatVersion: '2025-05-10'
 Description: >-
   Advanced multi-AZ VPC + ALB + AutoScaling CloudFormation template.
   Provides: VPC, two public subnets, two private subnets, NAT Gateways per AZ,
@@ -552,4 +552,5 @@ Outputs:
     Condition: CreateBastion
     Description: Bastion instance id (if created)
     Value:
+
       Ref: BastionInstance
